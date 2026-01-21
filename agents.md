@@ -2,172 +2,210 @@
 
 ## Overview
 
-This document outlines our approach to validate Apple's patch for CVE-2025-XXXXX (Pointer leaks through pointer-keyed data structures). We will build proof-of-concept binaries for both macOS and iOS to demonstrate that the vulnerability has been properly mitigated.
+This document outlines a focused approach to understanding the core mechanics of the pointer leak vulnerability disclosed by Project Zero. Rather than simulating a full attack scenario, we'll build a self-contained proof-of-concept that demonstrates ASLR slide extraction from within a single process.
 
 ## Background
 
-The vulnerability, disclosed by Jann Horn of Project Zero on September 26, 2025, allows remote extraction of pointer values without memory safety violations or timing attacks. The attack exploits pointer-based hashing in `NSDictionary` combined with `NSKeyedArchiver` serialization to leak the address of the `NSNull` singleton using the Chinese Remainder Theorem.
+The vulnerability exploits pointer-based hashing in `NSDictionary` to leak memory addresses. By crafting dictionaries with specific key patterns and observing serialization order, the `NSNull` singleton address can be extracted using the Chinese Remainder Theorem.
 
-Apple patched this vulnerability in their March 31, 2025 security releases.
+Apple patched this in their March 31, 2025 security releases.
 
-## Investigation Goals
+## Design Philosophy
 
-1. Build a macOS proof-of-concept to verify the patch is effective
-2. Build an iOS proof-of-concept to verify the patch extends to iOS devices
-3. Document the differences in behavior pre/post-patch
+**Keep it simple.** Focus on the mathematical and implementation fundamentals:
+- Hash function behavior (`_CFHashInt`)
+- Dictionary bucket allocation and collision resolution
+- Key construction to control bucket occupancy
+- Chinese Remainder Theorem application
 
-## Phase 1: macOS PoC Binary
+**No victim needed.** The PoC operates entirely within its own process space, making it easier to understand, debug, and verify patch effectiveness.
 
-### Objectives
+## Core PoC: Self-Contained ASLR Slide Leak
 
-- Implement the three-stage attack described in the Project Zero research
-- Verify that on patched macOS systems, the attack fails or returns incorrect addresses
-- Document the specific behavior changes introduced by the patch
+### Single Binary Design
 
-### Components to Build
+Build one Objective-C program (`leak-slide.m`) that:
+1. Constructs `NSDictionary` instances with calculated `NSNumber` keys
+2. Serializes the dictionaries containing `NSNull` singleton
+3. Observes `NSNull` position in serialized output
+4. Applies Chinese Remainder Theorem to extract the address
+5. Compares extracted address against actual `NSNull` location
+6. Calculates and displays the ASLR slide
 
-#### 1.1 Input Generator (`attacker-input-generator.c`)
+### Key Components
 
-Creates serialized plist data containing:
-- Multiple `NSDictionary` instances with calculated `NSNumber` keys
-- Two dictionaries per prime (23, 41, 71, 127, 191, 251, 383, 631, 1087)
-- Even-index and odd-index patterns to leak bucket positions
-- An `NSNull` singleton reference
+#### Hash Function Understanding
 
-**Key implementation details:**
-- Generate keys whose hashes modulo table_size create specific patterns
-- Use `_CFHashInt` logic: `hash = value * 0x9e3779b9`
-- Create both even and odd bucket occupation patterns
+The `_CFHashInt` function for `NSNumber`:
+```c
+hash = value * 0x9e3779b9
+```
 
-#### 1.2 Victim Program (`round-trip-victim.m`)
+Given a target hash and table size (prime number), we can calculate which `NSNumber` values will occupy specific buckets:
+```c
+bucket_index = (value * 0x9e3779b9) % table_size
+```
 
-Objective-C program that:
-- Accepts input plist file
-- Deserializes using `NSKeyedUnarchiver.unarchivedObjectOfClasses`
-- Whitelists: `NSDictionary`, `NSNumber`, `NSArray`, `NSString`, `NSNull`
-- Re-serializes using `NSKeyedArchiver.archivedDataWithRootObject`
-- Outputs the modified plist
+#### Dictionary Construction Strategy
 
-#### 1.3 Pointer Extractor (`extract-pointer.c`)
+For each prime table size (23, 41, 71, 127, 191, 251, 383, 631, 1087):
 
-Analyzes the re-serialized plist:
-- Determines `NSNull` position in each dictionary
-- Calculates `hash_code % prime` for each table size
-- Applies Chinese Remainder Theorem to reconstruct full address
-- Compares extracted address against expected `NSNull` singleton location
+1. Create two dictionaries:
+   - **Even pattern**: Keys hash to even bucket indices (0, 2, 4, ...)
+   - **Odd pattern**: Keys hash to odd bucket indices (1, 3, 5, ...)
 
-### Testing Methodology
+2. Insert `NSNull` as a key in both dictionaries
 
-1. Compile all components on latest macOS
-2. Run the three-stage attack
-3. Compare extracted address against actual `NSNull` address in memory
-4. Document whether:
-   - Address extraction fails completely
-   - Extracted address is incorrect (hashing changed)
-   - Additional randomization was introduced
-   - Dictionary serialization order changed
+3. Serialize each dictionary using `NSKeyedArchiver`
+
+4. Parse serialized output to find `NSNull` position relative to `NSNumber` keys
+
+5. From the position, deduce `NSNull_hash % table_size`
+
+#### Chinese Remainder Theorem Application
+
+With remainders for 9 different primes, we have:
+```
+NSNull_address ≡ r₁ (mod 23)
+NSNull_address ≡ r₂ (mod 41)
+...
+NSNull_address ≡ r₉ (mod 1087)
+```
+
+The product `23 × 41 × 71 × 127 × 191 × 251 × 383 × 631 × 1087` exceeds 2^64, so the CRT solution is unique and gives us the full 64-bit address.
+
+### Implementation Focus Areas
+
+#### 1. Key Generator
+
+Function to compute `NSNumber` values that hash to desired buckets:
+```objective-c
+NSArray* keysForBuckets(NSArray *targetBuckets, NSUInteger tableSize)
+```
+
+Must solve: `(value * 0x9e3779b9) % tableSize = targetBucket`
+
+This requires computing the modular multiplicative inverse of `0x9e3779b9` modulo each prime.
+
+#### 2. Dictionary Builder
+
+Create dictionaries with precise bucket occupation patterns:
+```objective-c
+NSDictionary* buildDictWithPattern(PatternType pattern, NSUInteger tableSize)
+```
+
+Patterns:
+- `EVEN`: Occupy indices 0, 2, 4, ... leaving 1, 3, 5, ... empty
+- `ODD`: Occupy indices 1, 3, 5, ... leaving 0, 2, 4, ... empty
+
+#### 3. Serialization Observer
+
+Serialize dictionary and extract key ordering:
+```objective-c
+NSArray* extractKeyOrder(NSDictionary *dict)
+```
+
+Parse the `NSKeyedArchiver` output to determine which position `NSNull` occupies.
+
+#### 4. CRT Solver
+
+Given remainders and moduli, compute the unique solution:
+```objective-c
+uint64_t chineseRemainderTheorem(NSArray *remainders, NSArray *moduli)
+```
+
+Implement extended Euclidean algorithm for modular inverse computation.
+
+#### 5. Slide Calculator
+
+Compare leaked address to known shared cache location:
+```objective-c
+void calculateSlide(uint64_t leakedAddress)
+```
+
+The slide is the difference between actual and expected base addresses.
+
+## Testing Approach
 
 ### Success Criteria
 
-- On patched systems, the attack should fail to extract the correct `NSNull` address
-- We should identify the specific mitigation technique used (e.g., keyed hash function, randomized serialization order)
+On **unpatched** systems:
+- Extract exact `NSNull` singleton address
+- Calculate correct ASLR slide
+- Verify against `dladdr()` or similar
 
-## Phase 2: iOS PoC Binary
+On **patched** systems:
+- Extraction fails or returns incorrect address
+- Document specific mitigation (keyed hash, randomized serialization, etc.)
 
-### Objectives
+### Validation Steps
 
-- Port the macOS PoC to iOS
-- Run on jailbroken iPhone to bypass code signing restrictions
-- Verify patch effectiveness on iOS
+1. Run PoC and capture leaked address
+2. Use debugger to confirm actual `NSNull` address: `p (void*)[NSNull null]`
+3. Compare values
+4. Calculate slide and verify against system info
 
-### Prerequisites
+### Debug Output
 
-- Jailbroken iPhone running iOS 18.3 or later (March 31, 2025 patch included)
-- SSH access to device
-- Ability to compile and sign binaries for iOS
+The PoC should print:
+```
+[+] Testing with table size 23 (even pattern)
+    NSNull position: 3
+    NSNull mod 23 = 14
 
-### Components to Port
+[+] Testing with table size 23 (odd pattern)
+    NSNull position: 7
+    NSNull mod 23 = 14 (confirmed)
 
-Same three-stage implementation as macOS:
-- `attacker-input-generator` (compile for arm64)
-- `round-trip-victim` (Objective-C, iOS SDK)
-- `extract-pointer` (compile for arm64)
+[...repeat for all primes...]
 
-### iOS-Specific Considerations
+[+] Applying Chinese Remainder Theorem
+    Leaked address: 0x1eb91ab60
+    Actual address: 0x1eb91ab60 [MATCH]
+    ASLR slide: 0x1eb900000
+```
 
-#### 2.1 Build Configuration
+## Platform Coverage
 
-- Use iOS SDK instead of macOS SDK
-- Target arm64 architecture
-- Sign with development certificate or fakesign on jailbroken device
-- Bundle as standalone binaries or simple app bundle
+### macOS
 
-#### 2.2 Deployment
+Primary development target. Test on:
+- Latest macOS (patched)
+- Older macOS versions (if available for comparison)
+- Both Apple Silicon and Intel
 
-- Transfer binaries via SSH/scp
-- Execute from command line (via SSH) or mobile terminal
-- May need to adjust file paths for iOS filesystem structure
+### iOS
 
-#### 2.3 Testing Approach
+Port the same single-binary approach:
+- Compile for arm64
+- Run on jailbroken device or simulator
+- Observe any iOS-specific differences in behavior
 
-1. Generate attack input on development machine or device
-2. Run victim program on iOS device
-3. Extract pointer and compare results
-4. Document any iOS-specific behavioral differences
+## Code Structure
 
-### iOS vs macOS Comparison
+```
+src/
+  leak-slide.m          # Main PoC implementation
+  hash-utils.h/m        # Hash function and modular arithmetic
+  dict-builder.h/m      # Dictionary construction logic
+  crt-solver.h/m        # Chinese Remainder Theorem implementation
 
-Document differences:
-- Address space layout differences
-- Shared cache location variations
-- Any iOS-specific mitigations
-- Performance characteristics
+tests/
+  test-hash-function.m  # Verify _CFHashInt replication
+  test-modular-inverse.m # Verify inverse computation
+  test-crt.m            # Verify CRT solver with known values
 
-### Success Criteria
+Makefile                # Build for macOS and iOS
+README.md               # Build and run instructions
+```
 
-- Confirm the patch is present and effective on iOS
-- Identify any platform-specific mitigation differences
-- Document shared cache behavior on iOS
+## Key Insights to Document
 
-## Phase 3: Documentation and Analysis
-
-### Deliverables
-
-1. **Technical Report**
-   - Detailed findings for both platforms
-   - Specific mitigation techniques identified
-   - Behavioral differences pre/post-patch
-
-2. **Source Code**
-   - All PoC components with clear documentation
-   - Build instructions for both platforms
-   - Sample inputs and expected outputs
-
-3. **Comparison Matrix**
-   - macOS vs iOS behavior
-   - Patched vs unpatched systems (if historical data available)
-   - Performance impact of mitigations
-
-## Risk Considerations
-
-### Ethical Constraints
-
-- Only test on controlled, authorized devices
-- Do not weaponize or distribute attack tools publicly
-- Coordinate with responsible disclosure timelines
-
-### Technical Risks
-
-- Jailbreak may interfere with testing
-- iOS sandbox restrictions may limit execution
-- Differences in Apple Silicon vs Intel may affect results
-
-## Timeline
-
-1. **Week 1-2:** macOS PoC implementation and testing
-2. **Week 3:** iOS porting and jailbreak environment setup
-3. **Week 4:** iOS testing and cross-platform analysis
-4. **Week 5:** Documentation and final report
+1. **Hash function accuracy**: How closely does our `_CFHashInt` replica match actual behavior?
+2. **Bucket collision resolution**: Does linear probing work exactly as expected?
+3. **Serialization determinism**: Is key ordering in `NSKeyedArchiver` output stable?
+4. **CRT precision**: Does the mathematical reconstruction produce exact addresses?
+5. **Patch mechanism**: How did Apple mitigate this? Keyed hashing? Randomization?
 
 ## References
 
