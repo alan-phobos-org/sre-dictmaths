@@ -1,0 +1,19 @@
+# Build artifacts
+leak-slide
+*.o
+*.dSYM/
+
+# macOS system files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+build/
+DerivedData/
+
+# Debugging
+*.log
