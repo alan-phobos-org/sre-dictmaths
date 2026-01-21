@@ -1,9 +1,53 @@
 #import "hash-utils.h"
+#import <Foundation/Foundation.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+static uint64_t g_hash_multiplier = DEFAULT_HASH_MULTIPLIER;
+static bool g_hash_linear = true;
+
+uint64_t get_hash_multiplier(void) {
+    return g_hash_multiplier;
+}
+
+bool hash_model_is_linear(void) {
+    return g_hash_linear;
+}
+
+bool calibrate_nsnumber_hash_multiplier(uint64_t *detected, size_t samples) {
+    if (samples == 0) {
+        samples = 8;
+    }
+
+    uint64_t candidate = (uint64_t)[@1 hash];
+    bool linear = true;
+
+    for (size_t i = 0; i < samples; i++) {
+        NSNumber *num = @(i);
+        uint64_t hash = (uint64_t)[num hash];
+        uint64_t expected = (uint64_t)i * candidate;
+        if (hash != expected) {
+            linear = false;
+            break;
+        }
+    }
+
+    if (linear) {
+        g_hash_multiplier = candidate;
+    } else {
+        g_hash_multiplier = DEFAULT_HASH_MULTIPLIER;
+    }
+
+    g_hash_linear = linear;
+    if (detected) {
+        *detected = g_hash_multiplier;
+    }
+
+    return linear;
+}
+
 uint64_t cf_hash_int(uint64_t value) {
-    return value * CF_HASH_MULTIPLIER;
+    return value * g_hash_multiplier;
 }
 
 int64_t extended_gcd(int64_t a, int64_t b, int64_t *x, int64_t *y) {
@@ -36,11 +80,24 @@ bool mod_inverse(uint64_t a, uint64_t m, uint64_t *result) {
 }
 
 bool find_key_for_bucket(uint64_t target_bucket, uint64_t table_size, uint64_t *result) {
-    // We need to solve: (value * 0x9e3779b9) % table_size = target_bucket
-    // This means: value = target_bucket * inverse(0x9e3779b9, table_size) % table_size
+    if (!hash_model_is_linear()) {
+        uint64_t limit = table_size * 128;
+        for (uint64_t candidate = 0; candidate < limit; candidate++) {
+            NSNumber *num = @(candidate);
+            uint64_t hash = (uint64_t)[num hash];
+            if ((hash % table_size) == target_bucket) {
+                *result = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
 
+    // We need to solve: (value * multiplier) % table_size = target_bucket
+    // This means: value = target_bucket * inverse(multiplier, table_size) % table_size
+    uint64_t multiplier = get_hash_multiplier();
     uint64_t inv;
-    if (!mod_inverse(CF_HASH_MULTIPLIER, table_size, &inv)) {
+    if (!mod_inverse(multiplier, table_size, &inv)) {
         return false;
     }
 

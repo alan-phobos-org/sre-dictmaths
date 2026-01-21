@@ -14,12 +14,17 @@ typedef enum {
 // and include NSNull as a key
 NSDictionary* build_dict_with_pattern(PatternType pattern, uint64_t table_size);
 
-// Extract the order of keys from a serialized dictionary
-// Returns an array where each element is @YES for NSNull, @NO for NSNumber
-NSArray* extract_key_order(NSDictionary *dict);
+// Extract the serialized key order from NSKeyedArchiver output
+NSArray* extract_serialized_keys(NSDictionary *dict);
 
-// Determine NSNull's position in the key ordering
+// Determine NSNull's position in the serialized key ordering
 NSInteger find_nsnull_position(NSDictionary *dict);
+
+// Determine NSNull's position given a serialized key array
+NSInteger find_nsnull_position_in_keys(NSArray *keys);
+
+// Validate that key ordering matches expected bucket order for the table size
+bool validate_bucket_order(NSArray *keys, uint64_t table_size, PatternType pattern);
 
 // Calculate NSNull hash modulo table_size from its position in two patterns
 // Returns true on success, false if calculation fails

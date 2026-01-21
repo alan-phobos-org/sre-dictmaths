@@ -1,5 +1,7 @@
 # Build artifacts
 leak-slide
+leak-slide-ios
+leak-slide-ios.skipped
 *.o
 *.dSYM/
 

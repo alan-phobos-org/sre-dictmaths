@@ -1,5 +1,6 @@
 #import "diagnostics.h"
 #import "hash-utils.h"
+#import "dict-builder.h"
 #include <stdio.h>
 #include <unistd.h>
 
@@ -41,44 +42,42 @@ void test_serialization_order(void) {
     dict[[NSNull null]] = @"null";
     dict[@3] = @"third";
 
-    NSError *error = nil;
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:dict
-                                         requiringSecureCoding:NO
-                                                         error:&error];
-
-    if (error) {
-        printf("[Diagnostic] Serialization error: %s\n", [[error description] UTF8String]);
-        return;
-    }
-
-    NSDictionary *decoded = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class]
-                                                               fromData:data
-                                                                  error:&error];
-
-    if (error) {
-        printf("[Diagnostic] Deserialization error: %s\n", [[error description] UTF8String]);
-        return;
-    }
-
     printf("[Diagnostic] Serialization test:\n");
     NSUInteger idx = 0;
-    for (id key in decoded) {
+    NSArray *keys = extract_serialized_keys(dict);
+    if (!keys) {
+        printf("  [Error] Failed to parse serialized key order\n");
+        return;
+    }
+    for (id key in keys) {
         const char *keyType = [key isKindOfClass:[NSNull class]] ? "NSNull" : "NSNumber";
         printf("  Position %lu: %s\n", (unsigned long)idx++, keyType);
     }
 }
 
 void test_nsnumber_hash_behavior(void) {
+    uint64_t detected = 0;
+    bool linear = calibrate_nsnumber_hash_multiplier(&detected, 10);
+
     printf("[Diagnostic] NSNumber hash tests:\n");
+    if (linear) {
+        printf("  Detected multiplier: 0x%llx (linear)\n", detected);
+    } else {
+        printf("  Hash appears non-linear; using fallback bucket search\n");
+    }
 
     for (int i = 0; i < 10; i++) {
         NSNumber *num = @(i);
         NSUInteger hash = [num hash];
-        uint64_t expected = (uint64_t)i * CF_HASH_MULTIPLIER;
+        uint64_t expected = (uint64_t)i * get_hash_multiplier();
 
-        printf("  @%d: hash=0x%lx, expected=0x%llx, %s\n",
-               i, (unsigned long)hash, expected,
-               (hash == expected) ? "MATCH" : "DIFFERENT");
+        if (linear) {
+            printf("  @%d: hash=0x%lx, expected=0x%llx, %s\n",
+                   i, (unsigned long)hash, expected,
+                   (hash == expected) ? "MATCH" : "DIFFERENT");
+        } else {
+            printf("  @%d: hash=0x%lx\n", i, (unsigned long)hash);
+        }
     }
 }
 
@@ -98,30 +97,16 @@ void test_bucket_prediction(void) {
 
     dict[[NSNull null]] = @"marker";
 
-    NSError *error = nil;
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:dict
-                                         requiringSecureCoding:NO
-                                                         error:&error];
-
-    if (error) {
-        printf("[Diagnostic] Serialization error in bucket prediction: %s\n",
-               [[error description] UTF8String]);
-        return;
-    }
-
-    NSDictionary *decoded = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSDictionary class]
-                                                               fromData:data
-                                                                  error:&error];
-
-    if (error) {
-        printf("[Diagnostic] Deserialization error in bucket prediction: %s\n",
-               [[error description] UTF8String]);
-        return;
-    }
-
     printf("[Diagnostic] Bucket prediction test (table size %llu):\n", prime);
     NSUInteger position = 0;
-    for (id key in decoded) {
+    NSArray *keys = extract_serialized_keys(dict);
+    if (!keys) {
+        printf("  [Error] Failed to parse serialized key order\n");
+        return;
+    }
+    bool order_ok = validate_bucket_order(keys, prime, PATTERN_EVEN);
+    printf("  Order validation: %s\n", order_ok ? "OK" : "MISMATCH");
+    for (id key in keys) {
         if ([key isKindOfClass:[NSNull class]]) {
             printf("  NSNull found at position %lu\n", (unsigned long)position);
 

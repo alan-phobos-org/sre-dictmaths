@@ -3,9 +3,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
-// Golden ratio constant used in _CFHashInt
-#define CF_HASH_MULTIPLIER 0x9e3779b9ULL
+// Default golden ratio constant used in _CFHashInt
+#define DEFAULT_HASH_MULTIPLIER 0x9e3779b9ULL
 
 // Prime numbers used for dictionary table sizes
 static const uint64_t TABLE_PRIMES[] = {23, 41, 71, 127, 191, 251, 383, 631, 1087};
@@ -13,6 +14,11 @@ static const uint64_t TABLE_PRIMES[] = {23, 41, 71, 127, 191, 251, 383, 631, 108
 
 // Compute hash for NSNumber value (mimics _CFHashInt)
 uint64_t cf_hash_int(uint64_t value);
+
+// Hash multiplier calibration for NSNumber hashing
+uint64_t get_hash_multiplier(void);
+bool calibrate_nsnumber_hash_multiplier(uint64_t *detected, size_t samples);
+bool hash_model_is_linear(void);
 
 // Compute modular multiplicative inverse using extended Euclidean algorithm
 bool mod_inverse(uint64_t a, uint64_t m, uint64_t *result);
