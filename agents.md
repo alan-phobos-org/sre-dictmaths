@@ -207,8 +207,62 @@ README.md               # Build and run instructions
 4. **CRT precision**: Does the mathematical reconstruction produce exact addresses?
 5. **Patch mechanism**: How did Apple mitigate this? Keyed hashing? Randomization?
 
+## Prior Research and Public Disclosure
+
+### Original Disclosure
+
+Jann Horn of Google Project Zero published this vulnerability research on September 26, 2025. The technique was disclosed responsibly to Apple, and Apple addressed it in their March 31, 2025 security releases across macOS and iOS.
+
+### Public Coverage
+
+Multiple security outlets covered this disclosure:
+- [The Cyber Express](https://thecyberexpress.com/project-zero-exposes-aslr-bypass/) - Project Zero Exposes ASLR Bypass in Apple Serialization Flaw
+- [Cryptika](https://www.cryptika.com/google-project-zero-details-aslr-bypass-on-apple-devices-using-nsdictionary-serialization/) - ASLR Bypass on Apple Devices Using NSDictionary Serialization
+- [Cybersecurity News](https://cybersecuritynews.com/aslr-bypass-on-apple-devices/) - Google Project Zero Details ASLR Bypass on Apple Devices
+- [CertCube Blog](https://blog.certcube.com/apple-fixes-aslr-bypass-vulnerability-discovered-by-google-project-zero-researcher/) - Apple Fixes ASLR Bypass Vulnerability
+
+### Known Technical Details
+
+**Vulnerability Scope:**
+- Affects both macOS and iOS
+- No specific CVE was assigned (likely due to limited real-world attack surface)
+- Jann Horn noted this was reported without filing in the Project Zero bugtracker due to lack of demonstrated real-world impact
+
+**Attack Characteristics:**
+- Requires ~50KB of crafted serialized data
+- Uses NSDictionary with mixed NSNumber and NSNull keys
+- Exploits deterministic serialization ordering in NSKeyedArchiver
+- Leverages pointer-based hashing in CoreFoundation's CFHash function
+
+**Apple's Mitigation Approach:**
+
+From the Project Zero blog, the suggested robust mitigation is:
+> "The most robust mitigation against this is to avoid using object addresses as lookup keys, or alternatively hash them with a keyed hash function (which should reduce the potential address leak to a pointer equality oracle)."
+
+It's unclear from public sources whether Apple implemented:
+1. **Keyed hash function** - Adding secret randomization to hash computation
+2. **Serialization randomization** - Randomizing output order during serialization
+3. **Alternative singleton handling** - Changing how NSNull singleton is hashed
+4. **Combination approach** - Multiple mitigations layered together
+
+### Gap in Public Knowledge
+
+**Unknown specifics:**
+- Exact implementation details of Apple's patch
+- Whether mitigation is in CoreFoundation, Foundation, or both layers
+- Performance impact of the mitigation
+- Whether older iOS/macOS versions received backports
+
+**Our PoC Goal:**
+By building a focused proof-of-concept that tests the core mechanics, we can:
+1. Verify patch effectiveness on current systems
+2. Identify which mitigation strategy Apple employed
+3. Document behavioral changes in hash computation or serialization
+4. Test cross-platform consistency (macOS vs iOS)
+
 ## References
 
 - Project Zero Blog: https://projectzero.google/2025/09/pointer-leaks-through-pointer-keyed.html
-- Apple Security Updates: March 31, 2025
+- [Apple Security Updates](https://support.apple.com/en-us/100100) - March 31, 2025
+- [CFHash Documentation](https://developer.apple.com/documentation/corefoundation/cfhash(_:)) - Apple Developer
 - reference.md in this repository
